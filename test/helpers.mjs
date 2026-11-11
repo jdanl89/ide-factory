@@ -17,12 +17,13 @@ export function cleanup(dir) {
   rmSync(dir, { recursive: true, force: true });
 }
 
-export async function idefactory(dir, args, extraEnv = {}) {
+export async function idefactory(dir, args, extraEnv = {}, io = {}) {
   let out = '';
   let err = '';
   const code = await run([...args, '--path', dir], {
     cwd: dir,
     env: { ...process.env, ...extraEnv },
+    isTTY: io.isTTY ?? false,
     stdout: { write(chunk) { out += chunk; return true; } },
     stderr: { write(chunk) { err += chunk; return true; } },
   });

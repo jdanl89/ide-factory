@@ -11,9 +11,11 @@ import { EXIT_NEEDS_AGENT, runFactory } from './orchestrate.mjs';
 import { buildPacket, syncTasks } from './queue.mjs';
 import { scaffoldConsumerCi } from './ci-scaffold.mjs';
 import { capturePullRequestComments, commentOnPullRequest, openPullRequest } from './pull-request.mjs';
+import { mapsFromSequence, setupProject, setupReadinessErrors } from './setup.mjs';
 import { verifyImport, verifyRun } from './verification-evidence.mjs';
 import { cliCommandKey, isMutatingCommand, withWriterLease } from './writer-lease.mjs';
 import { consumeEventWarning } from './event-log.mjs';
+import { closeLatestRunSession } from './run-session.mjs';
 
 const HELP = `idefactory — IDE-native software factory
 
@@ -29,7 +31,7 @@ Usage:
   idefactory checks preview [--path dir]
   idefactory sync-tasks <change> [--path dir]
   idefactory next [--change name] [--path dir]
-  idefactory run --change <name> [--until human-gate] [--max-tasks N] [--max-agent-steps N] [--new-run] [--path dir]
+  idefactory run --change <name> [--until human-gate] [--max-tasks N] [--max-agent-steps N] [--new-run] [--accept-baseline] [--path dir]
   idefactory attempt start <change> <taskId> [--path dir]
   idefactory attempt transition <attemptId> <state> [--evidence json] [--path dir]
   idefactory attempt show <attemptId> [--path dir]
@@ -45,6 +47,7 @@ Usage:
   idefactory lockout create --agent <id> --reviewer <id> --reason "text" [--path dir]
   idefactory lockout --agent <id> --reviewer <id> --reason "text" [--path dir]
   idefactory lockout resolve <id> --resolver <id> --reason "text" [--path dir]
+  idefactory setup [--detect] [--governance lightweight|strict] [--map <kind> --argv <part>...] [--no-test] [--verifier-argv <part>...] [--path dir]
   idefactory halt [path]
   idefactory resume [path]
 
@@ -66,13 +69,15 @@ export async function run(argv, io = {}) {
     return 0;
   }
   const project = projectDir(parsed.flags, parsed.rest, cwd, cmd);
-  const commandKey = cliCommandKey(cmd, parsed.rest);
+  const commandKey = cliCommandKey(cmd, parsed.rest, parsed.flags);
+  const isTTY = io.isTTY !== undefined ? Boolean(io.isTTY) : Boolean(process.stdin.isTTY);
   const execute = () => dispatchCommand(cmd, {
     project,
     parsed,
     env,
     out,
     err,
+    isTTY,
   });
   try {
     // HALT bypasses the writer lease so emergency stop cannot be blocked.
@@ -94,7 +99,7 @@ export async function run(argv, io = {}) {
 }
 
 async function dispatchCommand(cmd, ctx) {
-  const { project, parsed, env, out, err } = ctx;
+  const { project, parsed, env, out, err, isTTY } = ctx;
   switch (cmd) {
     case 'init': {
       const created = initProject(project, {
@@ -106,12 +111,16 @@ async function dispatchCommand(cmd, ctx) {
       out(`Initialized ${project}`);
       if (created.length) out(`Created: ${created.join(', ')}`);
       else out('Team state already present. Adapters refreshed.');
+      reportSetupGaps(project, out);
       return 0;
     }
     case 'upgrade':
       upgradeProject(project);
       out(`Upgraded adapters in ${project}`);
+      reportSetupGaps(project, out);
       return 0;
+    case 'setup':
+      return handleSetup(project, parsed, out, isTTY);
     case 'doctor':
       return reportDoctor(project, out, err);
     case 'status':
@@ -131,6 +140,7 @@ async function dispatchCommand(cmd, ctx) {
       const change = parsed.rest[0];
       const result = syncTasks(project, change, env);
       out(`Synced ${result.change}: created ${result.created}, skipped ${result.skipped}.`);
+      for (const line of result.suggestions || []) out(line);
       return 0;
     }
     case 'next': {
@@ -149,6 +159,7 @@ async function dispatchCommand(cmd, ctx) {
         hostTokens: parsed.flags['host-tokens'],
         hostCost: parsed.flags['host-cost'],
         newRun: Boolean(parsed.flags['new-run']),
+        acceptBaseline: Boolean(parsed.flags['accept-baseline']),
       });
       out(result.text);
       return result.code === EXIT_NEEDS_AGENT ? EXIT_NEEDS_AGENT : result.code;
@@ -259,11 +270,20 @@ function handleAttempt(project, parsed, env, out) {
         ? JSON.parse(parsed.flags.evidence)
         : parsed.flags.evidence;
     }
-    const attempt = transitionAttempt(project, attemptId, state, {
-      evidence,
-      actorId: evidence.implementerId || evidence.reviewerId || null,
-      env,
-    });
+    let attempt;
+    try {
+      attempt = transitionAttempt(project, attemptId, state, {
+        evidence,
+        actorId: evidence.implementerId || evidence.reviewerId || null,
+        env,
+      });
+    } catch (error) {
+      if (String(error?.message || '').startsWith('retry-cap')) {
+        const current = getAttempt(project, attemptId);
+        if (current?.change) closeLatestRunSession(project, current.change, 'retry-cap');
+      }
+      throw error;
+    }
     out(JSON.stringify(attempt, null, 2));
     return 0;
   }
@@ -377,6 +397,7 @@ function reportDoctor(project, out, err) {
 function parseArgs(argv) {
   const rest = [];
   const flags = {};
+  const sequence = [];
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
     if (token === '--') {
@@ -386,12 +407,40 @@ function parseArgs(argv) {
     if (token.startsWith('--')) {
       const key = token.slice(2);
       const next = argv[i + 1];
-      if (next === undefined || next.startsWith('--')) flags[key] = true;
-      else {
+      if (next === undefined || next.startsWith('--')) {
+        flags[key] = true;
+        sequence.push({ key, value: true });
+      } else {
         flags[key] = next;
+        sequence.push({ key, value: next });
         i += 1;
       }
     } else rest.push(token);
   }
-  return { cmd: rest[0], rest: rest.slice(1), flags };
+  return { cmd: rest[0], rest: rest.slice(1), flags, sequence };
+}
+
+function reportSetupGaps(project, out) {
+  const gaps = setupReadinessErrors(project);
+  for (const gap of gaps) out(gap);
+  if (gaps.length) out('Run idefactory setup to record the missing answer.');
+}
+
+async function handleSetup(project, parsed, out, isTTY) {
+  if (parsed.flags.detect) {
+    const result = await setupProject(project, { detectOnly: true });
+    out(result.text);
+    return 0;
+  }
+  const { maps, verifierArgv } = mapsFromSequence(parsed.sequence || []);
+  const governance = typeof parsed.flags.governance === 'string' ? parsed.flags.governance : '';
+  const result = await setupProject(project, {
+    governance,
+    maps,
+    noTest: Boolean(parsed.flags['no-test']),
+    verifierArgv,
+    isTTY: Boolean(isTTY),
+  });
+  out(result.text);
+  return 0;
 }

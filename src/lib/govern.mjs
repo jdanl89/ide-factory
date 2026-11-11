@@ -4,6 +4,7 @@ import path from 'node:path';
 import { ROLES, ledger, readText, writeText } from './layout.mjs';
 import { appendControlEvent } from './event-log.mjs';
 import { confirmPrincipal, configuredPrincipalProvider, readPolicyVersion } from './principal.mjs';
+import { setupReadinessErrors } from './setup.mjs';
 import { writeScopedApproval } from './risk-gates.mjs';
 import { resolveGitBinding } from './verification-evidence.mjs';
 import { listWorkItems, workCounts } from './work.mjs';
@@ -49,9 +50,7 @@ export function doctor(project) {
   if (!fs.existsSync(path.join(project, 'openspec'))) warnings.push('openspec/ is not initialized');
   if (fs.existsSync(path.join(project, 'HALT'))) warnings.push('HALT file is present');
   const policyVersion = readPolicyVersion(project);
-  if (policyVersion < 2) {
-    warnings.push('gate approvals are not bound to a verified principal');
-  }
+  for (const item of setupReadinessErrors(project)) errors.push(item);
   for (const kind of unmappedCheckKinds(project)) {
     warnings.push(`unmapped check kind: ${kind}`);
   }

@@ -5,6 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attemptPath, getAttempt } from './attempt.mjs';
 import { appendControlEvent } from './event-log.mjs';
+import { classifyCheckOutcome, retryKey } from './red-evidence.mjs';
+import { closeLatestRunSession } from './run-session.mjs';
 import { halted, writeText } from './layout.mjs';
 
 const SUPPORTED_SCHEMA_VERSION = 1;
@@ -153,8 +155,8 @@ function validateCheckEntry(kind, entry, projectRoot) {
 /**
  * Run a registered check and store derived evidence on the attempt.
  * `passed` is always derived from exitCode, timedOut, and artifact presence.
- * Caller-supplied `red` objects are ignored; only `asRed: true` with a
- * non-zero exit stores evidence.red.
+ * Caller-supplied `red` objects are ignored. `--red` stores an assertion
+ * failure at evidence.reds[kind] and does not write evidence.red.
  *
  * @param {string} project
  * @param {string} attemptId
@@ -184,11 +186,33 @@ export async function verifyRun(project, attemptId, options = {}) {
   if (!entry) throw new Error(`Unknown check kind: ${kind}`);
 
   const startedAt = new Date().toISOString();
-  const { exitCode, timedOut, stdout, stderr } = await spawnCheck(entry.argv, {
+  const { exitCode, timedOut, stdout, stderr, spawnError } = await spawnCheck(entry.argv, {
     cwd: project,
     timeoutMs: entry.timeoutMs,
   });
+  if (spawnError && !asRed) throw spawnError;
   const finishedAt = new Date().toISOString();
+  const output = Buffer.concat([stdout, stderr]).toString('utf8');
+  const classification = classifyCheckOutcome({
+    spawnError,
+    timedOut,
+    exitCode,
+    output,
+    asRed,
+  });
+
+  if (asRed && classification !== 'assertion-failure') {
+    const count = noteRetry(attempt, classification, kind);
+    writeText(attemptPath(project, attemptId), JSON.stringify(attempt, null, 2));
+    if (count >= 4) {
+      closeLatestRunSession(project, attempt.change, 'retry-cap');
+      throw new Error(`retry-cap: ${classification} for ${kind}`);
+    }
+    if (classification === 'vacuous-red') {
+      closeLatestRunSession(project, attempt.change, 'vacuous-red');
+    }
+    throw new Error(`${classification}: red run did not record an assertion failure for ${kind}`);
+  }
 
   const logDigest = digestBytes(Buffer.concat([stdout, stderr]));
   const { artifactDigests, allPresent } = hashArtifacts(project, entry.artifacts);
@@ -223,9 +247,7 @@ export async function verifyRun(project, attemptId, options = {}) {
   validateCheckRecord(record);
 
   if (asRed) {
-    if (exitCode !== 0) {
-      attempt.evidence.red = record;
-    }
+    attempt.evidence.reds = { ...(attempt.evidence.reds || {}), [kind]: record };
   } else if (isSecurityPatternedCheck(kind)) {
     attempt.evidence.security = [...(attempt.evidence.security || []), record];
   } else {
@@ -387,8 +409,18 @@ export async function verifyImport(project, attemptId, options = {}) {
   return { attempt, record };
 }
 
+function noteRetry(attempt, classification, kind) {
+  if (classification !== 'infrastructure-failure' && classification !== 'vacuous-red') return 0;
+  const key = retryKey(classification, kind);
+  const counts = { ...(attempt.evidence.retryCounts || {}) };
+  counts[key] = (counts[key] || 0) + 1;
+  attempt.evidence.retryCounts = counts;
+  attempt.updatedAt = new Date().toISOString();
+  return counts[key];
+}
+
 function spawnCheck(argv, { cwd, timeoutMs }) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const child = spawn(argv[0], argv.slice(1), {
       cwd,
       shell: false,
@@ -404,20 +436,32 @@ function spawnCheck(argv, { cwd, timeoutMs }) {
     });
 
     let timedOut = false;
+    let settled = false;
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(payload);
+    };
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGKILL');
     }, timeoutMs);
 
     child.on('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
+      finish({
+        exitCode: null,
+        timedOut,
+        spawnError: error,
+        stdout: Buffer.concat(stdoutChunks),
+        stderr: Buffer.concat(stderrChunks),
+      });
     });
     child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({
+      finish({
         exitCode: typeof code === 'number' ? code : 1,
         timedOut,
+        spawnError: null,
         stdout: Buffer.concat(stdoutChunks),
         stderr: Buffer.concat(stderrChunks),
       });

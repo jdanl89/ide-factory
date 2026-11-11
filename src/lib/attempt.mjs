@@ -12,6 +12,7 @@ import {
   requiresSecurityStage,
 } from './risk-gates.mjs';
 import { getWorkItem, updateWorkItem } from './work.mjs';
+import { hasAnyFailingRed, isFailingRed, redForKind, requiredTestKinds, retryKey } from './red-evidence.mjs';
 
 export const ATTEMPT_STATES = [
   'planned',
@@ -30,7 +31,7 @@ export const ATTEMPT_STATES = [
 const TRANSITIONS = {
   planned: ['assigned'],
   assigned: ['implementing'],
-  implementing: ['red-confirmed'],
+  implementing: ['red-confirmed', 'verifying'],
   'red-confirmed': ['verifying'],
   verifying: ['security-checking', 'awaiting-review'],
   'security-checking': ['awaiting-review', 'rejected'],
@@ -105,6 +106,17 @@ export function transitionAttempt(project, attemptId, nextState, {
   // Reject check-result payloads before any mutation so the attempt file stays unchanged.
   rejectCallerSuppliedCheckResults(evidence);
   validateEvidence(project, attempt, nextState, evidence);
+  if (nextState === 'rejected' && (attempt.state === 'awaiting-review' || attempt.state === 'security-checking')) {
+    const key = retryKey('review-rejection');
+    const counts = { ...(attempt.evidence.retryCounts || {}) };
+    counts[key] = (counts[key] || 0) + 1;
+    attempt.evidence.retryCounts = counts;
+    if (counts[key] >= 4) {
+      attempt.updatedAt = new Date().toISOString();
+      writeText(attemptPath(project, attemptId), JSON.stringify(attempt, null, 2));
+      throw new Error('retry-cap: review rejection refused');
+    }
+  }
 
   if (nextState === 'implementing' && actorId) attempt.implementerId = actorId;
   const mainReviewerVerdict = attempt.state === 'awaiting-review'
@@ -181,11 +193,20 @@ function rejectCallerSuppliedCheckResults(evidence) {
 
 function validateEvidence(project, attempt, nextState, evidence) {
   if (nextState === 'red-confirmed') {
-    const storedRed = attempt.evidence?.red;
-    if (!storedRed || storedRed.passed !== false) {
+    if (!hasAnyFailingRed(attempt)) {
       throw new Error(
         'red-confirmed requires stored evidence.red from verify run (passed:false); do not supply red in the transition payload',
       );
+    }
+  }
+  if (nextState === 'verifying') {
+    const item = getWorkItem(project, attempt.change, attempt.taskId);
+    const taskType = item?.factory?.taskType === 'lightweight' ? 'lightweight' : 'code';
+    if (taskType !== 'lightweight') {
+      const missing = requiredTestKinds(item?.factory?.checks).filter((kind) => !isFailingRed(redForKind(attempt, kind)));
+      if (missing.length) {
+        throw new Error(`verifying requires a recorded failing CLI red for: ${missing.join(', ')}`);
+      }
     }
   }
   if (nextState === 'awaiting-review' && attempt.state === 'verifying') {

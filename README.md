@@ -12,10 +12,21 @@ npm link
 
 cd /path/to/your-project
 idefactory init
+idefactory setup
 idefactory doctor
 ```
 
 `init` works in a new directory or an existing repo. It creates `.factory/` and the Cursor, Copilot, Claude, and Cline adapters. It does not delete application files, and it does not copy this repository's GitHub workflows. A second run keeps `decisions.md`, agent histories, charters, and the roster. Text already in `AGENTS.md`, `CLAUDE.md`, or `.github/copilot-instructions.md` stays; the factory inserts a marked section. A `.squad/` directory is left untouched.
+
+`idefactory setup` records the test command and the governance mode. The default is lightweight governance: policy version 1 and no principal verifier. In a terminal it asks for the test command and the mode. From a script, pass the answers as flags:
+
+```bash
+idefactory setup --governance lightweight --map unit --argv dotnet --argv test
+idefactory setup --governance strict --map unit --argv npm --argv test --verifier-argv node --verifier-argv scripts/verify-principal.mjs
+idefactory setup --governance lightweight --no-test
+```
+
+`--governance strict` stores policy version 2 and the `--verifier-argv` command. Strict setup writes nothing when that argv is missing. `--no-test` records that the project has no test command. `init` and `upgrade` do not ask these questions; they print the gap and leave an existing registry in place. `idefactory setup --detect` prints proposed commands and writes nothing.
 
 Without a global link:
 
@@ -73,7 +84,7 @@ flowchart TD
   complete --> done
 ```
 
-Cursor, Claude, and Copilot slash commands are `/factory-status`, `/factory-plan`, `/factory-build`, `/factory-run`, `/factory-full`, and `/factory-review`. Cline workflows use the filename, for example `/factory-status.md`.
+Cursor, Claude, and Copilot slash commands are `/factory-status`, `/factory-plan`, `/factory-build`, `/factory-run`, `/factory-full`, `/factory-review`, and `/factory-setup`. Cline workflows use the filename, for example `/factory-status.md`.
 
 ## Gates and stops
 
@@ -135,6 +146,7 @@ flowchart TD
 | Command | What it does |
 | --- | --- |
 | `idefactory init` | Install `.factory/` and IDE adapters |
+| `idefactory setup` | Record the test command and lightweight or strict governance |
 | `idefactory upgrade` | Refresh factory-owned skills, commands, rules, and workflows |
 | `idefactory doctor` | Fail if required team state or adapter files are missing |
 | `idefactory status` | Show halt, the active change, the roster, and work queue counts |

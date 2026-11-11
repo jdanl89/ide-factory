@@ -1,11 +1,5 @@
 {
   "schemaVersion": 1,
   "checks": {
-    "unit": {
-      "argv": ["npm", "test"],
-      "cwdPolicy": "project",
-      "timeoutMs": 120000,
-      "artifacts": []
-    }
   }
 }

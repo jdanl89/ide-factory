@@ -594,6 +594,7 @@ test('CLI wraps each mutating command once at top level; read-only stays unlease
       ['lockout', 'create', '--agent', 'a1', '--reviewer', 'r1', '--reason', 'block'],
       ['lockout', 'resolve', 'lock-1', '--resolver', 'r2', '--reason', 'clear'],
       ['resume'],
+      ['setup', '--governance', 'lightweight', '--no-test'],
     ];
     for (const args of mutating) {
       assert.equal(isMutatingCommand(cliCommandKey(args[0], args.slice(1))), true, args.join(' '));
@@ -602,6 +603,8 @@ test('CLI wraps each mutating command once at top level; read-only stays unlease
     assert.equal(isReadOnlyCommand(cliCommandKey('doctor')), true);
     assert.equal(isReadOnlyCommand(cliCommandKey('help')), true);
     assert.equal(isReadOnlyCommand(cliCommandKey('attempt', ['show', 'x'])), true);
+    assert.equal(isReadOnlyCommand(cliCommandKey('setup', [], { detect: true })), true);
+    assert.equal(isMutatingCommand(cliCommandKey('setup', [], { detect: true })), false);
     assert.equal(isMutatingCommand(cliCommandKey('halt')), false);
 
     const lease = acquireWriterLease(dir, 'complete', { leaseId: 'cli-holder' });

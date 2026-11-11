@@ -55,6 +55,10 @@ const COMMANDS = [
     name: 'factory-review',
     description: 'Review the current factory task as a different role',
   },
+  {
+    name: 'factory-setup',
+    description: 'Confirm the test command and governance mode, then record them',
+  },
 ];
 
 export function initProject(project, options = {}) {

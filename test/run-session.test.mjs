@@ -7,7 +7,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { attemptPath, getAttempt } from '../src/lib/attempt.mjs';
 import { readRunSession, validateRunSession } from '../src/lib/run-session.mjs';
-import { updateWorkItem } from '../src/lib/work.mjs';
+import { listWorkItems, updateWorkItem } from '../src/lib/work.mjs';
 import { cleanup, idefactory, repoRoot, tempProject } from './helpers.mjs';
 
 function validSession(overrides = {}) {
@@ -212,7 +212,7 @@ async function recordRed(dir, attemptId) {
     'verify', 'run', attemptId, '--check', 'unit', '--red',
   ]);
   assert.equal(result.code, 0, result.err + result.out);
-  assert.ok(getAttempt(dir, attemptId).evidence.red);
+    assert.ok(getAttempt(dir, attemptId).evidence.reds?.unit);
 }
 
 async function recordPassingChecks(dir, attemptId) {
@@ -544,7 +544,7 @@ test('recorded red result does not increment session failure count', async () =>
       'verify', 'run', firstRequest.attemptId, '--check', 'unit', '--red',
     ]);
     assert.equal(redRun.code, 0, redRun.err + redRun.out);
-    assert.ok(getAttempt(dir, firstRequest.attemptId).evidence.red);
+    assert.ok(getAttempt(dir, firstRequest.attemptId).evidence.reds?.unit);
 
     const filesAfterRed = listRunSessionFiles(dir);
     assert.equal(filesAfterRed.length, 1);
@@ -901,7 +901,6 @@ test('after implementing CLI red and red-confirmed transition repeat run exits 0
   const dir = tempProject();
   try {
     await seedDemoChange(dir);
-    writeCheckRegistry(dir, { unit: 1 });
 
     const first = spawnRun(dir, ['--max-agent-steps', '10']);
     assert.equal(first.status, 2, first.stderr + first.stdout);
@@ -918,11 +917,12 @@ test('after implementing CLI red and red-confirmed transition repeat run exits 0
     const secondRequest = parseOrchestrationJson(second.stdout);
     assert.equal(secondRequest.state, 'implementing');
 
+    writeCheckRegistry(dir, { unit: 1 });
     const redRun = await idefactory(dir, [
       'verify', 'run', firstRequest.attemptId, '--check', 'unit', '--red',
     ]);
     assert.equal(redRun.code, 0, redRun.err + redRun.out);
-    assert.ok(getAttempt(dir, firstRequest.attemptId).evidence.red);
+    assert.ok(getAttempt(dir, firstRequest.attemptId).evidence.reds?.unit);
 
     assert.equal(
       (await idefactory(dir, [
@@ -1145,7 +1145,6 @@ test('accepted attempt emits complete request without incrementing agent steps',
   const dir = tempProject();
   try {
     await seedDemoChange(dir);
-    writeCheckRegistry(dir, { unit: 1 });
 
     const first = spawnRun(dir, ['--max-agent-steps', '10']);
     assert.equal(first.status, 2, first.stderr + first.stdout);
@@ -1194,7 +1193,6 @@ test('repeat complete request with unchanged attempt exits 0 unchanged-state wit
   const dir = tempProject();
   try {
     await seedDemoChange(dir);
-    writeCheckRegistry(dir, { unit: 1 });
 
     const first = spawnRun(dir, ['--max-agent-steps', '10']);
     assert.equal(first.status, 2, first.stderr + first.stdout);
@@ -1278,6 +1276,10 @@ const BOUNDED_RUN_SKILL_STOPS = [
   'wall-clock',
   'max-failures',
   'unchanged-state',
+  'vacuous-red',
+  'infrastructure-failure',
+  'baseline',
+  'retry-cap',
 ];
 
 function factoryRunSkillLoopSection(text) {
@@ -1352,4 +1354,105 @@ test('implementation notes record strict validate, npm test, and doctor', () => 
   assert.match(notes, /npx openspec validate persist-bounded-run-sessions --strict/);
   assert.match(notes, /npm test/);
   assert.match(notes, /node src\/cli\.mjs doctor/);
+});
+
+function writeBaselineCheck(dir, argv) {
+  fs.writeFileSync(path.join(dir, '.factory/checks.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    checks: {
+      unit: {
+        argv,
+        cwdPolicy: 'project',
+        timeoutMs: 5000,
+        artifacts: [],
+      },
+    },
+  }, null, 2)}\n`);
+}
+
+test('baseline stops for infrastructure or assertion failure and continues when accepted or green', async () => {
+  const infra = tempProject();
+  try {
+    await seedDemoChange(infra);
+    writeBaselineCheck(infra, ['definitely-missing-idefactory-bin']);
+    const stopped = spawnRun(infra, ['--max-tasks', '1']);
+    assert.equal(stopped.status, 0, stopped.stderr + stopped.stdout);
+    assert.match(stopped.stdout, /infrastructure-failure/);
+    assert.match(stopped.stdout, /idefactory setup/);
+    assert.doesNotMatch(stopped.stdout, /# Orchestration request/);
+  } finally {
+    cleanup(infra);
+  }
+
+  const red = tempProject();
+  try {
+    await seedDemoChange(red);
+    writeCheckRegistry(red, { unit: 1 });
+    const stopped = spawnRun(red, ['--max-tasks', '1']);
+    assert.equal(stopped.status, 0, stopped.stderr + stopped.stdout);
+    assert.match(stopped.stdout, /baseline/);
+    assert.doesNotMatch(stopped.stdout, /# Orchestration request/);
+    const attemptId = listWorkItems(red, 'demo')[0].attemptId;
+    assert.equal(getAttempt(red, attemptId).evidence.reds, undefined);
+
+    const accepted = spawnRun(red, ['--max-tasks', '1', '--accept-baseline']);
+    assert.equal(accepted.status, 2, accepted.stderr + accepted.stdout);
+    assert.match(accepted.stdout, /# Orchestration request/);
+    assert.equal(getAttempt(red, attemptId).evidence.reds, undefined);
+    const session = readRunSession(listRunSessionFiles(red)[0]);
+    assert.equal(session.testBaseline.result, 'accepted');
+  } finally {
+    cleanup(red);
+  }
+
+  const green = tempProject();
+  try {
+    await seedDemoChange(green);
+    writeCheckRegistry(green, { unit: 0 });
+    const continued = spawnRun(green, ['--max-tasks', '1']);
+    assert.equal(continued.status, 2, continued.stderr + continued.stdout);
+    assert.match(continued.stdout, /# Orchestration request/);
+    const session = readRunSession(listRunSessionFiles(green)[0]);
+    assert.equal(session.testBaseline.result, 'passed');
+  } finally {
+    cleanup(green);
+  }
+});
+
+test('the fourth identical infrastructure failure sticks at retry-cap and an earlier one can be retried', async () => {
+  const dir = tempProject();
+  try {
+    await seedDemoChange(dir);
+    writeBaselineCheck(dir, ['definitely-missing-idefactory-bin']);
+    for (let n = 1; n <= 3; n += 1) {
+      const stopped = spawnRun(dir, ['--max-tasks', '1']);
+      assert.equal(stopped.status, 0, stopped.stderr + stopped.stdout);
+      assert.match(stopped.stdout, /infrastructure-failure/);
+      assert.doesNotMatch(stopped.stdout, /# Orchestration request/);
+    }
+    const capped = spawnRun(dir, ['--max-tasks', '1']);
+    assert.equal(capped.status, 0, capped.stderr + capped.stdout);
+    assert.match(capped.stdout, /retry-cap/);
+    assert.doesNotMatch(capped.stdout, /# Orchestration request/);
+    const again = spawnRun(dir, ['--max-tasks', '1']);
+    assert.equal(again.status, 0, again.stderr + again.stdout);
+    assert.match(again.stdout, /retry-cap/);
+    assert.doesNotMatch(again.stdout, /# Orchestration request/);
+  } finally {
+    cleanup(dir);
+  }
+
+  const retry = tempProject();
+  try {
+    await seedDemoChange(retry);
+    writeBaselineCheck(retry, ['definitely-missing-idefactory-bin']);
+    const stopped = spawnRun(retry, ['--max-tasks', '1']);
+    assert.match(stopped.stdout, /infrastructure-failure/);
+    writeCheckRegistry(retry, { unit: 0 });
+    const continued = spawnRun(retry, ['--max-tasks', '1']);
+    assert.equal(continued.status, 2, continued.stderr + continued.stdout);
+    assert.match(continued.stdout, /# Orchestration request/);
+  } finally {
+    cleanup(retry);
+  }
 });

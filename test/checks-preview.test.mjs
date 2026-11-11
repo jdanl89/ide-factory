@@ -35,6 +35,14 @@ test('checks preview does not replace an existing unit entry', async () => {
   try {
     assert.equal((await idefactory(dir, ['init'])).code, 0);
     const registryPath = path.join(dir, '.factory/checks.json');
+    const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+    registry.checks.unit = {
+      argv: ['npm', 'test'],
+      cwdPolicy: 'project',
+      timeoutMs: 120000,
+      artifacts: [],
+    };
+    fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2));
     const before = fs.readFileSync(registryPath, 'utf8');
     fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'echo no' } }));
     const result = await idefactory(dir, ['checks', 'preview']);

@@ -368,6 +368,14 @@ function resolveSourceRevision(project, change) {
       && attempt.evidence.red.sourceRevision.length > 0) {
       return attempt.evidence.red.sourceRevision;
     }
+    const reds = attempt.evidence?.reds;
+    if (reds && typeof reds === 'object') {
+      for (const record of Object.values(reds)) {
+        if (typeof record?.sourceRevision === 'string' && record.sourceRevision.length > 0) {
+          return record.sourceRevision;
+        }
+      }
+    }
   }
   return '';
 }

@@ -13,6 +13,20 @@ import {
   upsertWorkItem,
 } from './work.mjs';
 
+export function parseChangeRoute(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/);
+  for (const line of lines) {
+    if (/^- \[[^\]]*\]/.test(line)) return null;
+    const match = line.match(/^factory-route:\s*(\S+)\s*$/);
+    if (!match) continue;
+    if (match[1] !== 'quick' && match[1] !== 'full') {
+      throw new Error(`factory-route must be quick or full, got ${match[1]}`);
+    }
+    return match[1];
+  }
+  return null;
+}
+
 export function parseCheckboxes(markdown) {
   const tasks = [];
   const pattern = /^- \[([^\]]*)\]\s+(\d+(?:\.\d+)+)\s+(.+)$/gm;
@@ -49,9 +63,10 @@ export function loadChangeTasks(project, change) {
     throw new Error(`OpenSpec change not found: openspec/changes/${change}/tasks.md`);
   }
   const markdown = fs.readFileSync(file, 'utf8');
+  const changeRoute = parseChangeRoute(markdown);
   return parseCheckboxes(markdown).map((task) => {
     const { factory, acceptanceCriteria } = parseFactoryBlock(markdown, task.id);
-    return { ...task, factory, acceptanceCriteria, markdown };
+    return { ...task, factory, acceptanceCriteria, markdown, changeRoute };
   });
 }
 
@@ -59,13 +74,26 @@ export function syncTasks(project, change, _env) {
   if (halted(project)) throw haltError();
   ensureWorkDirs(project);
   const tasks = loadChangeTasks(project, change);
+  const suggestions = [];
+  for (const task of tasks) {
+    classifyTask({
+      id: task.id,
+      title: task.title,
+      body: task.title,
+      factory: task.factory,
+      routeDefault: task.changeRoute,
+    });
+    if (!task.factory?.route && !task.changeRoute && /\b(fix|bug|hotfix|bugfix)\b/i.test(task.title)) {
+      suggestions.push('suggested route: quick');
+    }
+  }
   const existing = listWorkItems(project, change);
 
   if (existing.length === 0) {
-    return createInitialItems(project, change, tasks);
+    return { ...createInitialItems(project, change, tasks), suggestions };
   }
 
-  return reconcileExistingItems(project, change, tasks, existing);
+  return { ...reconcileExistingItems(project, change, tasks, existing), suggestions };
 }
 
 function createInitialItems(project, change, tasks) {
@@ -153,6 +181,7 @@ function applyTitleUpdates(project, change, tasks, itemById) {
       title: task.title,
       body: task.title,
       factory: task.factory,
+      routeDefault: task.changeRoute,
     });
     upsertWorkItem(project, {
       ...item,
@@ -206,6 +235,7 @@ function writeNewWorkItem(project, change, task) {
     title: task.title,
     body: task.title,
     factory: task.factory,
+    routeDefault: task.changeRoute,
   });
   upsertWorkItem(project, {
     id: task.id,
@@ -318,7 +348,7 @@ export function buildPacket(project, env, changeName) {
   const config = readConfig(project);
   const role = primaryRole(item);
   const modelProfile = item.factory?.modelProfile || config.roles?.[role]?.modelProfile || 'coding-standard';
-  const text = renderPacket({ role, item, modelProfile });
+  const text = renderPacket({ role, item, modelProfile, project });
   ledger(project, 'next', { role, change: item.change, task: item.id });
   return { empty: false, text, role, task: item, item };
 }
@@ -330,9 +360,10 @@ function selectAcrossChanges(project) {
     || null;
 }
 
-function renderPacket({ role, item, modelProfile }) {
+function renderPacket({ role, item, modelProfile, project }) {
   const criteria = (item.acceptanceCriteria || []).map((entry) => `- ${entry}`).join('\n');
   const roles = (item.factory?.roles || []).join(', ');
+  const prior = priorRejectionBlock(project, item, role);
   return `# Work packet
 
 Role: ${role}
@@ -360,7 +391,7 @@ ${item.title}
 
 Acceptance criteria:
 ${criteria || '- (see the task)'}
-
+${prior}
 Method:
 - Prefer common scaffolds and libraries over hand-rolled toolchains (for example npm create vite@latest for a SPA).
 - Write a failing test before production code when the profile includes unit or equivalent checks.
@@ -373,11 +404,55 @@ The IDE session model does the work. Do not start a model process.
 `;
 }
 
+function priorRejectionBlock(project, item, role) {
+  if (!project || role === 'reviewer' || role === 'security-reviewer' || role === 'scribe') return '';
+  const notes = priorRejections(project, item.change, item.id);
+  if (notes.length === 0) return '';
+  return `\nPrior rejections:\n${notes.join('\n')}\n`;
+}
+
+function priorRejections(project, change, taskId) {
+  const root = attemptsRoot(project);
+  if (!fs.existsSync(root)) return [];
+  const rows = [];
+  for (const name of fs.readdirSync(root)) {
+    if (!name.endsWith('.json')) continue;
+    const attempt = getAttempt(project, name.slice(0, -'.json'.length));
+    if (!attempt || attempt.change !== change || attempt.taskId !== taskId || !attempt.id) continue;
+    const reviewReject = attempt.state === 'rejected' || attempt.evidence?.review?.verdict === 'REJECT';
+    const securityReject = attempt.evidence?.securityReview?.verdict === 'REJECT';
+    if (!reviewReject && !securityReject) continue;
+    rows.push(attempt);
+  }
+  rows.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+  const lines = [];
+  for (const attempt of rows) {
+    if (attempt.state === 'rejected' || attempt.evidence?.review?.verdict === 'REJECT') {
+      lines.push(`- ${attempt.id}: ${attempt.evidence?.review?.notes || ''}`);
+    }
+    if (attempt.evidence?.securityReview?.verdict === 'REJECT') {
+      const note = attempt.evidence.securityReview.notes || attempt.evidence.securityReview.verdict;
+      lines.push(`- ${attempt.id} security review: ${note}`);
+    }
+  }
+  return lines;
+}
+
 function primaryRole(item) {
+  if (item.factory?.route === 'quick') return 'engineer';
   const roles = item.factory?.roles || [];
   if (roles.includes('architect')) return 'architect';
   const implementer = roles.find((role) => !['reviewer', 'scribe', 'security-reviewer', 'test-engineer'].includes(role));
   return implementer || 'engineer';
+}
+
+export function renderWorkPacket(project, item, role) {
+  return renderPacket({
+    role,
+    item,
+    modelProfile: 'coding-standard',
+    project,
+  });
 }
 
 function readActiveChange(project) {

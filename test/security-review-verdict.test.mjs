@@ -128,7 +128,7 @@ async function recordRed(dir, attemptId) {
     'verify', 'run', attemptId, '--check', 'unit', '--red',
   ]);
   assert.equal(result.code, 0, result.err + result.out);
-  assert.ok(getAttempt(dir, attemptId).evidence.red);
+  assert.ok(getAttempt(dir, attemptId).evidence.reds?.unit);
 }
 
 async function recordPassingChecks(dir, attemptId) {
