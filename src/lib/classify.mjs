@@ -37,7 +37,7 @@ export function parseFactoryBlock(markdown, taskId) {
   return { factory: parseSimpleYaml(blockLines.join('\n')), acceptanceCriteria };
 }
 
-export function classifyTask({ id, title, body = '', factory }) {
+export function classifyTask({ id, title, body = '', factory, routeDefault = null }) {
   const text = `${title}\n${body}`;
   const base = factory && typeof factory === 'object' ? { ...factory } : {};
   const kind = base.kind || inferKind(text);
@@ -56,16 +56,36 @@ export function classifyTask({ id, title, body = '', factory }) {
   const dependencies = Array.isArray(base.dependencies)
     ? base.dependencies.map(String)
     : inferSequentialDependency(id);
+  if (base.taskType !== undefined && base.taskType !== 'code' && base.taskType !== 'lightweight') {
+    throw new Error(`factory.taskType must be code or lightweight, got ${base.taskType}`);
+  }
+  const taskType = base.taskType || (kind === 'docs' ? 'lightweight' : 'code');
+  if (base.route !== undefined && base.route !== 'quick' && base.route !== 'full') {
+    throw new Error(`factory.route must be quick or full, got ${base.route}`);
+  }
+  const route = base.route || routeDefault || 'full';
+  let rolesOut = roles;
+  let checksOut = checks;
+  let securityOut = securityProfile;
+  if (route === 'quick') {
+    rolesOut = ['engineer', 'reviewer', 'scribe'];
+    if (!base.securityProfile) securityOut = 'dependency-basic';
+    if (!(Array.isArray(base.checks) && base.checks.length)) {
+      checksOut = checks.filter((check) => !/security|sast|threat|secret|audit/i.test(check));
+    }
+  }
 
   return {
     kind,
     risk,
-    roles,
-    checks,
+    roles: rolesOut,
+    checks: checksOut,
     modelProfile,
-    securityProfile,
+    securityProfile: securityOut,
     verificationProfile,
     dependencies,
+    taskType,
+    route,
   };
 }
 

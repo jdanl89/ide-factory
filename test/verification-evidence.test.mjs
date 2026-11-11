@@ -284,13 +284,14 @@ test('verify run --red stores red only on non-zero exit', async () => {
     ]);
     assert.equal(failResult.code, 0, failResult.err + failResult.out);
     const failed = getAttempt(dir, failAttempt.id);
-    assert.ok(failed.evidence.red, 'red evidence must be stored on non-zero exit');
-    assert.equal(failed.evidence.red.kind, 'unit');
-    assert.deepEqual(failed.evidence.red.argv, failArgv);
-    assert.equal(failed.evidence.red.exitCode, 1);
-    assert.equal(failed.evidence.red.passed, false);
-    assert.equal(failed.evidence.red.issuer, 'cli');
-    assert.equal(failed.evidence.red.timedOut, false);
+    assert.ok(failed.evidence.reds?.unit, 'red evidence must be stored on non-zero exit');
+    assert.equal(failed.evidence.red, null);
+    assert.equal(failed.evidence.reds.unit.kind, 'unit');
+    assert.deepEqual(failed.evidence.reds.unit.argv, failArgv);
+    assert.equal(failed.evidence.reds.unit.exitCode, 1);
+    assert.equal(failed.evidence.reds.unit.passed, false);
+    assert.equal(failed.evidence.reds.unit.issuer, 'cli');
+    assert.equal(failed.evidence.reds.unit.timedOut, false);
 
     const passDir = tempProject();
     try {
@@ -298,9 +299,11 @@ test('verify run --red stores red only on non-zero exit', async () => {
       const passResult = await idefactory(passDir, [
         'verify', 'run', passAttempt.id, '--check', 'unit', '--red',
       ]);
-      assert.equal(passResult.code, 0, passResult.err + passResult.out);
+      assert.notEqual(passResult.code, 0);
+      assert.match(`${passResult.err}${passResult.out}`, /vacuous-red/);
       const passed = getAttempt(passDir, passAttempt.id);
       assert.equal(passed.evidence.red, null);
+      assert.equal(passed.evidence.reds, undefined);
     } finally {
       cleanup(passDir);
     }
@@ -333,12 +336,13 @@ test('caller-supplied red object is ignored unless --red and non-zero exit', asy
         red: forged,
       });
       const afterFail = getAttempt(failDir, failAttempt.id);
-      assert.ok(afterFail.evidence.red);
-      assert.equal(afterFail.evidence.red.issuer, 'cli');
-      assert.equal(afterFail.evidence.red.exitCode, 1);
-      assert.equal(afterFail.evidence.red.passed, false);
-      assert.notEqual(afterFail.evidence.red.command, 'forged');
-      assert.notDeepEqual(afterFail.evidence.red, forged);
+      assert.ok(afterFail.evidence.reds?.unit);
+      assert.equal(afterFail.evidence.red, null);
+      assert.equal(afterFail.evidence.reds.unit.issuer, 'cli');
+      assert.equal(afterFail.evidence.reds.unit.exitCode, 1);
+      assert.equal(afterFail.evidence.reds.unit.passed, false);
+      assert.notEqual(afterFail.evidence.reds.unit.command, 'forged');
+      assert.notDeepEqual(afterFail.evidence.reds.unit, forged);
     } finally {
       cleanup(failDir);
     }
@@ -995,4 +999,149 @@ test('implementation notes record strict validate, npm test, and doctor', () => 
   assert.match(notes, /npx openspec validate enforce-verification-evidence --strict/);
   assert.match(notes, /npm test/);
   assert.match(notes, /node src\/cli\.mjs doctor/);
+});
+
+test('red runs keep each kind and classify infrastructure, vacuous red, and assertion failure', async () => {
+  const dir = tempProject();
+  try {
+    const attempt = await seedAttempt(dir, 1);
+    const registry = {
+      schemaVersion: 1,
+      checks: {
+        unit: registryForExit(1).checks.unit,
+        integration: registryForExit(1).checks.unit,
+      },
+    };
+    fs.writeFileSync(path.join(dir, '.factory/checks.json'), `${JSON.stringify(registry, null, 2)}\n`);
+    assert.equal((await idefactory(dir, ['verify', 'run', attempt.id, '--check', 'unit', '--red'])).code, 0);
+    assert.equal((await idefactory(dir, ['verify', 'run', attempt.id, '--check', 'integration', '--red'])).code, 0);
+    const stored = getAttempt(dir, attempt.id);
+    assert.equal(stored.evidence.red, null);
+    assert.equal(stored.evidence.reds.unit.kind, 'unit');
+    assert.equal(stored.evidence.reds.integration.kind, 'integration');
+    assert.equal(stored.evidence.reds.unit.passed, false);
+    assert.equal(stored.evidence.reds.integration.passed, false);
+
+    fs.writeFileSync(path.join(dir, '.factory/checks.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      checks: {
+        unit: {
+          argv: ['definitely-missing-idefactory-bin'],
+          cwdPolicy: 'project',
+          timeoutMs: 5000,
+          artifacts: [],
+        },
+        integration: registry.checks.integration,
+      },
+    }, null, 2)}\n`);
+    const infra = await idefactory(dir, ['verify', 'run', attempt.id, '--check', 'unit', '--red']);
+    assert.notEqual(infra.code, 0);
+    assert.match(infra.err, /infrastructure-failure/);
+    assert.equal(getAttempt(dir, attempt.id).evidence.reds.integration.kind, 'integration');
+    assert.equal(getAttempt(dir, attempt.id).evidence.reds.unit.exitCode, 1);
+
+    fs.writeFileSync(path.join(dir, '.factory/checks.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      checks: {
+        unit: {
+          argv: [process.execPath, '-e', "console.error('no tests'); process.exit(1)"],
+          cwdPolicy: 'project',
+          timeoutMs: 5000,
+          artifacts: [],
+        },
+      },
+    }, null, 2)}\n`);
+    const none = await idefactory(dir, ['verify', 'run', attempt.id, '--check', 'unit', '--red']);
+    assert.notEqual(none.code, 0);
+    assert.match(none.err, /infrastructure-failure/);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('legacy evidence.red satisfies unit and verifying requires every code test kind', async () => {
+  const legacyDir = tempProject();
+  try {
+    const attempt = await seedAttempt(legacyDir, 0);
+    const file = path.join(legacyDir, '.factory', 'attempts', `${attempt.id}.json`);
+    const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+    stored.evidence.red = {
+      schemaVersion: 1,
+      kind: 'unit',
+      issuer: 'cli',
+      exitCode: 1,
+      passed: false,
+      timedOut: false,
+    };
+    delete stored.evidence.reds;
+    fs.writeFileSync(file, JSON.stringify(stored, null, 2));
+    assert.equal((await idefactory(legacyDir, ['attempt', 'transition', attempt.id, 'implementing', '--evidence', JSON.stringify({ implementerId: 'engineer-1' })])).code, 0);
+    assert.equal((await idefactory(legacyDir, ['attempt', 'transition', attempt.id, 'red-confirmed'])).code, 0);
+    const verified = await idefactory(legacyDir, ['attempt', 'transition', attempt.id, 'verifying']);
+    assert.equal(verified.code, 0, verified.err);
+  } finally {
+    cleanup(legacyDir);
+  }
+
+  const dir = tempProject();
+  try {
+    const attempt = await seedAttempt(dir, 1);
+    const registry = {
+      schemaVersion: 1,
+      checks: {
+        unit: registryForExit(1).checks.unit,
+        integration: registryForExit(1).checks.unit,
+      },
+    };
+    fs.writeFileSync(path.join(dir, '.factory/checks.json'), `${JSON.stringify(registry, null, 2)}\n`);
+    assert.equal((await idefactory(dir, ['verify', 'run', attempt.id, '--check', 'unit', '--red'])).code, 0);
+    const itemPath = path.join(dir, '.factory/work/items/demo--1.1.json');
+    const item = JSON.parse(fs.readFileSync(itemPath, 'utf8'));
+    item.factory.checks = ['unit', 'integration'];
+    item.factory.taskType = 'code';
+    fs.writeFileSync(itemPath, JSON.stringify(item, null, 2));
+    assert.equal((await idefactory(dir, ['attempt', 'transition', attempt.id, 'implementing', '--evidence', JSON.stringify({ implementerId: 'engineer-1' })])).code, 0);
+    assert.equal((await idefactory(dir, ['attempt', 'transition', attempt.id, 'red-confirmed'])).code, 0);
+    const blocked = await idefactory(dir, ['attempt', 'transition', attempt.id, 'verifying']);
+    assert.notEqual(blocked.code, 0);
+    assert.match(blocked.err, /integration/);
+    assert.equal(getAttempt(dir, attempt.id).state, 'red-confirmed');
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('a lightweight attempt enters verifying with no red record', async () => {
+  const dir = tempProject();
+  try {
+    const attempt = await seedAttempt(dir, 0);
+    const itemPath = path.join(dir, '.factory/work/items/demo--1.1.json');
+    const item = JSON.parse(fs.readFileSync(itemPath, 'utf8'));
+    item.factory.taskType = 'lightweight';
+    item.factory.checks = ['unit'];
+    fs.writeFileSync(itemPath, JSON.stringify(item, null, 2));
+    assert.equal((await idefactory(dir, ['attempt', 'transition', attempt.id, 'implementing', '--evidence', JSON.stringify({ implementerId: 'engineer-1' })])).code, 0);
+    const moved = await idefactory(dir, ['attempt', 'transition', attempt.id, 'verifying']);
+    assert.equal(moved.code, 0, moved.err);
+    assert.equal(getAttempt(dir, attempt.id).state, 'verifying');
+    assert.equal(getAttempt(dir, attempt.id).evidence.red, null);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('installed factory-verify names verify run and does not supply a pass boolean', async () => {
+  const dir = tempProject();
+  try {
+    assert.equal((await idefactory(dir, ['init'])).code, 0);
+    const skill = fs.readFileSync(path.join(dir, '.cursor/skills/factory-verify/SKILL.md'), 'utf8');
+    assert.match(skill, /idefactory verify run/);
+    assert.match(skill, /--red/);
+    assert.match(skill, /vacuous-red/);
+    assert.match(skill, /infrastructure-failure/);
+    assert.doesNotMatch(skill, /passed"\s*:/);
+    assert.doesNotMatch(skill, /pass boolean/i);
+  } finally {
+    cleanup(dir);
+  }
 });

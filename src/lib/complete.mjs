@@ -10,6 +10,7 @@ import {
 } from './finalization-recovery.mjs';
 import { hasActiveLockout } from './govern.mjs';
 import { halted, ledger, readText } from './layout.mjs';
+import { isFailingRed, redForKind, requiredTestKinds } from './red-evidence.mjs';
 import {
   assertPassingCliSecurityEvidence,
   humanGateAllows,
@@ -20,8 +21,6 @@ import {
   validateCheckRecord,
 } from './verification-evidence.mjs';
 import { getWorkItem } from './work.mjs';
-
-const RED_REQUIRED_KINDS = new Set(['unit', 'integration', 'playwright', 'contract']);
 
 /**
  * Complete an accepted (or recoverable) attempt via journaled finalization.
@@ -108,6 +107,7 @@ export function completeWorkItem(project, change, taskId, attemptId, options = {
   const { sourceRevision } = assertChecksPassed(project, attempt, requiredChecks, {
     allowDirtyWorktree: Boolean(resumeJournal),
     expectedSourceRevision: resumeJournal?.sourceRevision,
+    taskType: item.factory?.taskType,
   });
   assertPassingCliSecurityEvidence(project, attempt, item);
 
@@ -258,18 +258,12 @@ function assertChecksPassed(project, attempt, required, options = {}) {
     }
   }
 
-  for (const kind of required) {
-    if (!RED_REQUIRED_KINDS.has(kind)) continue;
-    const red = attempt.evidence?.red;
-    if (
-      !red
-      || red.issuer !== 'cli'
-      || red.kind !== kind
-      || red.exitCode === undefined
-      || red.exitCode === null
-      || red.exitCode === 0
-    ) {
-      throw new Error(`complete requires a recorded failing CLI red for: ${kind}`);
+  const taskType = options.taskType === 'lightweight' ? 'lightweight' : 'code';
+  if (taskType === 'code') {
+    for (const kind of requiredTestKinds(required)) {
+      if (!isFailingRed(redForKind(attempt, kind))) {
+        throw new Error(`complete requires a recorded failing CLI red for: ${kind}`);
+      }
     }
   }
 

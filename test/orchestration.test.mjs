@@ -10,7 +10,7 @@ import {
 } from '../src/lib/finalization-recovery.mjs';
 import { writeText } from '../src/lib/layout.mjs';
 import { commandDigest } from '../src/lib/verification-evidence.mjs';
-import { getWorkItem } from '../src/lib/work.mjs';
+import { getWorkItem, itemPath } from '../src/lib/work.mjs';
 import { cleanup, idefactory, tempProject } from './helpers.mjs';
 
 function git(cwd, args) {
@@ -118,7 +118,7 @@ async function recordRed(dir, attemptId, kinds = { unit: 1 }) {
     'verify', 'run', attemptId, '--check', kind, '--red',
   ]);
   assert.equal(result.code, 0, result.err + result.out);
-  assert.ok(getAttempt(dir, attemptId).evidence.red, 'verify --red must store red evidence');
+  assert.ok(getAttempt(dir, attemptId).evidence.reds?.[kind], 'verify --red must store red evidence');
 }
 
 async function recordPassingChecks(dir, attemptId, kinds = { unit: 0 }) {
@@ -483,9 +483,9 @@ test('attempt transition rejects caller-supplied check results and still accepts
     assert.equal(stored.reviewerId, 'reviewer-1');
     assert.equal(stored.evidence.review?.notes, 'reviewer notes only');
     assert.equal(stored.implementerId, 'engineer-1');
-    assert.ok(stored.evidence.red);
-    assert.equal(stored.evidence.red.issuer, 'cli');
-    assert.notEqual(stored.evidence.red.passed, true);
+    assert.ok(stored.evidence.reds?.unit);
+    assert.equal(stored.evidence.reds.unit.issuer, 'cli');
+    assert.notEqual(stored.evidence.reds.unit.passed, true);
     assert.equal(stored.evidence.verification.length, 1);
     assert.equal(stored.evidence.verification[0].passed, true);
     assert.equal(stored.evidence.verification[0].issuer, 'cli');
@@ -912,5 +912,62 @@ test('run emits needs-complete for finalized attempt with matching unfinished jo
     assert.equal(getAttempt(dir, attempt.id).state, 'finalized');
   } finally {
     cleanup(dir);
+  }
+});
+
+test('quick route implements as engineer and verifies as reviewer unless security is explicit', async () => {
+  const dir = tempProject();
+  try {
+    await seedChange(dir, [
+      'factory-route: quick',
+      '',
+      '- [ ] 1.1 Fix the auth parser',
+      '  factory:',
+      '    kind: general',
+      '    checks: [unit]',
+      '    verificationProfile: frontend-low',
+      '    roles: [architect, reviewer, scribe]',
+      '',
+    ].join('\n'));
+    const stored = getWorkItem(dir, 'demo', '1.1');
+    stored.factory.roles = ['architect', 'reviewer', 'scribe'];
+    fs.writeFileSync(itemPath(dir, 'demo', '1.1'), `${JSON.stringify(stored, null, 2)}\n`);
+    const first = await idefactory(dir, ['run', '--change', 'demo', '--max-tasks', '1']);
+    assert.equal(first.code, 2, first.err + first.out);
+    assert.match(first.out, /^Role: engineer$/m);
+
+    const started = await idefactory(dir, ['attempt', 'start', 'demo', '1.1']);
+    assert.equal(started.code, 0, started.err);
+    const attempt = JSON.parse(started.out);
+    await advanceToVerifying(dir, attempt.id, { passChecks: {} });
+    const review = await idefactory(dir, ['run', '--change', 'demo', '--max-tasks', '1']);
+    assert.equal(review.code, 2, review.err + review.out);
+    assert.match(review.out, /^Role: reviewer$/m);
+  } finally {
+    cleanup(dir);
+  }
+
+  const sensitive = tempProject();
+  try {
+    await seedChange(sensitive, [
+      'factory-route: quick',
+      '',
+      '- [ ] 1.1 Fix the parser',
+      '  factory:',
+      '    kind: general',
+      '    checks: [unit]',
+      '    securityProfile: security-sensitive',
+      '    verificationProfile: frontend-low',
+      '',
+    ].join('\n'));
+    const started = await idefactory(sensitive, ['attempt', 'start', 'demo', '1.1']);
+    assert.equal(started.code, 0, started.err);
+    const attempt = JSON.parse(started.out);
+    await advanceToVerifying(sensitive, attempt.id, { passChecks: {} });
+    const review = await idefactory(sensitive, ['run', '--change', 'demo', '--max-tasks', '1']);
+    assert.equal(review.code, 2, review.err + review.out);
+    assert.match(review.out, /^Role: security-reviewer$/m);
+  } finally {
+    cleanup(sensitive);
   }
 });

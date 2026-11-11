@@ -403,7 +403,7 @@ async function recordRed(dir, attemptId) {
     'verify', 'run', attemptId, '--check', 'unit', '--red',
   ]);
   assert.equal(result.code, 0, result.err + result.out);
-  assert.ok(getAttempt(dir, attemptId).evidence.red);
+  assert.ok(getAttempt(dir, attemptId).evidence.reds?.unit);
 }
 
 async function recordPassingChecks(dir, attemptId) {
@@ -818,7 +818,7 @@ test('security-checking to awaiting-review rejected without passing CLI security
     const shipped = JSON.parse(
       fs.readFileSync(path.join(dir, '.factory', 'checks.json'), 'utf8'),
     );
-    assert.equal(shipped.checks.unit !== undefined, true);
+    assert.equal(shipped.checks.unit, undefined);
     assert.equal(shipped.checks['threat-review'], undefined);
 
     const started = await idefactory(dir, ['attempt', 'start', 'demo', '3.2']);
@@ -906,10 +906,10 @@ test('recorded red security result does not authorize awaiting-review', async ()
     ]);
     assert.equal(red.code, 0, red.err + red.out);
     const attempt = getAttempt(dir, attemptId);
-    assert.ok(attempt.evidence.red);
-    assert.equal(attempt.evidence.red.kind, 'threat-review');
-    assert.equal(attempt.evidence.red.exitCode, 1);
-    assert.equal(attempt.evidence.red.passed, false);
+    assert.ok(attempt.evidence.reds?.['threat-review']);
+    assert.equal(attempt.evidence.reds['threat-review'].kind, 'threat-review');
+    assert.equal(attempt.evidence.reds['threat-review'].exitCode, 1);
+    assert.equal(attempt.evidence.reds['threat-review'].passed, false);
     assert.equal((attempt.evidence.security || []).length, 0);
 
     const beforeRaw = fs.readFileSync(

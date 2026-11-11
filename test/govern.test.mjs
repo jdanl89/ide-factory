@@ -23,6 +23,18 @@ function sha256Digest(text) {
   return `sha256:${createHash('sha256').update(text, 'utf8').digest('hex')}`;
 }
 
+function mapUnit(dir) {
+  const registryPath = path.join(dir, '.factory/checks.json');
+  const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  registry.checks.unit = {
+    argv: ['node', '--test'],
+    cwdPolicy: 'project',
+    timeoutMs: 120000,
+    artifacts: [],
+  };
+  fs.writeFileSync(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
+}
+
 function extractPrintedLockoutId(out) {
   const match = out.match(/\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i)
     || out.match(/lockout\s+id[:\s]+([A-Za-z0-9._-]+)/i)
@@ -174,6 +186,7 @@ test('doctor requires .factory/governance.md and does not require GOLDEN_RULES.m
   const dir = tempProject();
   try {
     assert.equal((await idefactory(dir, ['init'])).code, 0);
+    mapUnit(dir);
     assert.equal(fs.existsSync(path.join(dir, 'GOLDEN_RULES.md')), false);
     assert.equal((await idefactory(dir, ['doctor'])).code, 0);
     fs.unlinkSync(path.join(dir, '.factory/governance.md'));
@@ -447,5 +460,73 @@ test('shipped factory-governance skill copies document lockout resolve', () => {
       /--resolver/,
       `${rel} must document --resolver`,
     );
+  }
+});
+
+test('complete requires every code red kind and allows a lightweight item without red', async () => {
+  const missing = tempProject();
+  try {
+    await seedDemoChange(missing);
+    const itemPath = path.join(missing, '.factory/work/items/demo--1.1.json');
+    const started = await idefactory(missing, ['attempt', 'start', 'demo', '1.1']);
+    const attemptId = JSON.parse(started.out).id;
+    await acceptDemoAttempt(missing, attemptId);
+    writeCheckRegistry(missing, { unit: 0, integration: 0 });
+    const item = JSON.parse(fs.readFileSync(itemPath, 'utf8'));
+    item.factory.checks = ['unit', 'integration'];
+    item.factory.taskType = 'code';
+    fs.writeFileSync(itemPath, JSON.stringify(item, null, 2));
+    ensureCleanGitCommit(missing);
+    assert.equal((await idefactory(missing, ['verify', 'run', attemptId, '--check', 'unit'])).code, 0);
+    assert.equal((await idefactory(missing, ['verify', 'run', attemptId, '--check', 'integration'])).code, 0);
+    const blocked = await idefactory(missing, ['complete', 'demo', '1.1', '--attempt', attemptId]);
+    assert.notEqual(blocked.code, 0);
+    assert.match(blocked.err, /integration/);
+    assert.notEqual(getWorkItem(missing, 'demo', '1.1').status, 'done');
+  } finally {
+    cleanup(missing);
+  }
+
+  const light = tempProject();
+  try {
+    assert.equal((await idefactory(light, ['init'])).code, 0);
+    setPolicyVersion(light, 1);
+    fs.mkdirSync(path.join(light, 'openspec/changes/demo'), { recursive: true });
+    writeText(
+      path.join(light, 'openspec/changes/demo/tasks.md'),
+      [
+        '- [ ] 1.1 Note the docs',
+        '  factory:',
+        '    kind: docs',
+        '    taskType: lightweight',
+        '    checks: [unit]',
+        '    verificationProfile: frontend-low',
+        '    roles: [engineer, reviewer, scribe]',
+        '',
+      ].join('\n'),
+    );
+    assert.equal((await idefactory(light, ['sync-tasks', 'demo'])).code, 0);
+    const started = await idefactory(light, ['attempt', 'start', 'demo', '1.1']);
+    const attemptId = JSON.parse(started.out).id;
+    assert.equal((await idefactory(light, [
+      'attempt', 'transition', attemptId, 'implementing',
+      '--evidence', JSON.stringify({ implementerId: 'engineer-1' }),
+    ])).code, 0);
+    assert.equal((await idefactory(light, ['attempt', 'transition', attemptId, 'verifying'])).code, 0);
+    writeCheckRegistry(light, { unit: 0 });
+    ensureFactoryGitignore(light);
+    ensureCleanGitCommit(light);
+    assert.equal((await idefactory(light, ['verify', 'run', attemptId, '--check', 'unit'])).code, 0);
+    assert.equal((await idefactory(light, ['attempt', 'transition', attemptId, 'awaiting-review'])).code, 0);
+    assert.equal((await idefactory(light, [
+      'attempt', 'transition', attemptId, 'accepted',
+      '--evidence', JSON.stringify({ reviewerId: 'reviewer-1', verdict: 'ACCEPT' }),
+    ])).code, 0);
+    const done = await idefactory(light, ['complete', 'demo', '1.1', '--attempt', attemptId]);
+    assert.equal(done.code, 0, done.err + done.out);
+    assert.equal(getWorkItem(light, 'demo', '1.1').status, 'done');
+    assert.equal(getAttempt(light, attemptId).evidence.red, null);
+  } finally {
+    cleanup(light);
   }
 });

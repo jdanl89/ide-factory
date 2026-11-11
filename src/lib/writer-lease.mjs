@@ -10,7 +10,7 @@ export const LEASE_HELD = 'LEASE_HELD';
 export const LEASE_RECOVERY = 'LEASE_RECOVERY';
 export const OWNERSHIP_LOST = 'OWNERSHIP_LOST';
 
-const READ_ONLY = new Set(['status', 'doctor', 'help', 'attempt show']);
+const READ_ONLY = new Set(['status', 'doctor', 'help', 'attempt show', 'setup detect']);
 const MUTATING = new Set([
   'init',
   'upgrade',
@@ -31,6 +31,7 @@ const MUTATING = new Set([
   'lockout create',
   'lockout resolve',
   'resume',
+  'setup',
 ]);
 
 /**
@@ -48,7 +49,7 @@ export function writerLeaseDir(project) {
  * @param {string[]} [rest]
  * @returns {string}
  */
-export function cliCommandKey(cmd, rest = []) {
+export function cliCommandKey(cmd, rest = [], flags = {}) {
   const head = String(cmd || '').trim();
   if (head === 'attempt') {
     const sub = String(rest[0] || '').trim();
@@ -80,6 +81,7 @@ export function cliCommandKey(cmd, rest = []) {
     if (sub === 'scaffold') return 'ci scaffold';
     return sub ? `ci ${sub}` : 'ci';
   }
+  if (head === 'setup' && flags.detect) return 'setup detect';
   return head;
 }
 

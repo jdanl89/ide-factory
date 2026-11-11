@@ -28,6 +28,7 @@ You route work. You do not implement product code in the same turn.
 - Build or "do the next task": follow the `factory-build` skill.
 - Bounded multi-task orchestration: follow the `factory-run` skill.
 - Review: follow the reviewer charter only, then `factory-governance`.
+- Set up the factory, or a doctor report of a missing test decision or principal verifier: follow the `factory-setup` skill.
 
 ## How to use roles
 

@@ -6,16 +6,16 @@ Installs the same factory skills, slash commands, and rules for Cursor, GitHub C
 ## Requirements
 
 ### Requirement: Shared command set
-The system SHALL install status, plan, build, run, full, and review commands for Cursor, GitHub Copilot, Claude Code, and Cline.
+The system SHALL install status, plan, build, run, full, review, and setup commands for Cursor, GitHub Copilot, Claude Code, and Cline.
 
 #### Scenario: Command files
 - **WHEN** init finishes
-- **THEN** each supported IDE has adapter files for status, plan, build, run, full, and review
+- **THEN** each supported IDE has adapter files for status, plan, build, run, full, review, and setup
 - **AND** each command directs the IDE to its corresponding factory skill
 
 #### Scenario: Cline workflow files
 - **WHEN** init finishes
-- **THEN** `.cline/workflows/` contains `factory-status.md`, `factory-plan.md`, `factory-build.md`, `factory-run.md`, `factory-full.md`, and `factory-review.md`
+- **THEN** `.cline/workflows/` contains `factory-status.md`, `factory-plan.md`, `factory-build.md`, `factory-run.md`, `factory-full.md`, `factory-review.md`, and `factory-setup.md`
 - **AND** each workflow directs Cline to the same factory skill as the matching Cursor command
 
 ### Requirement: No model launcher
@@ -55,7 +55,7 @@ The system SHALL install the same factory skill directories under `.cline/skills
 
 #### Scenario: Skill directories
 - **WHEN** init finishes
-- **THEN** `.cline/skills/` contains `factory-coordinator`, `factory-openspec`, `factory-build`, `factory-run`, `factory-full`, `factory-governance`, `factory-tdd`, `factory-verify`, and `factory-debug`
+- **THEN** `.cline/skills/` contains `factory-coordinator`, `factory-openspec`, `factory-build`, `factory-run`, `factory-full`, `factory-governance`, `factory-tdd`, `factory-verify`, `factory-debug`, and `factory-setup`
 - **AND** each of those directories contains `SKILL.md`
 
 ### Requirement: Cline narrow activation
@@ -92,3 +92,26 @@ Installed factory guidance SHALL name `idefactory pr open`, `idefactory pr comme
 - **WHEN** the installed factory-run skill is read
 - **THEN** it names `sync-tasks`, `run`, `approve`, `complete`, `verify`, `ci scaffold`, and archive or spec sync as actions that wait for the human
 - **AND** it does not name another pull-request command as legal
+
+### Requirement: Setup skill confirms before writing
+The installed factory-setup skill SHALL tell the human which test command it proposes, and SHALL NOT run `idefactory setup` until the human confirms or corrects that command and the governance mode. The skill SHALL NOT instruct the session to hand-edit the check registry.
+
+#### Scenario: Unconfirmed command
+- **WHEN** the skill has proposed a test command and the human has not confirmed or corrected it
+- **THEN** the skill does not run `idefactory setup`
+
+#### Scenario: Confirmed command
+- **WHEN** the human confirms or corrects the test command and names the governance mode
+- **THEN** the skill runs `idefactory setup` with those values as flags
+
+### Requirement: Verify skills name the verification command
+The installed factory-build, factory-tdd, and factory-verify skills SHALL name `idefactory verify run`, including `--red` for a failing test on a `code` item. They SHALL tell the session to stop when the result is `vacuous-red` or `infrastructure-failure`. They SHALL NOT instruct the session to send a pass boolean, a red object, or a verification object on an attempt transition.
+
+#### Scenario: Verify skill does not invent a payload
+- **WHEN** the installed factory-verify skill is read
+- **THEN** it names `idefactory verify run`
+- **AND** it does not instruct the session to attach a pass boolean to an attempt transition
+
+#### Scenario: Build skill stops on vacuous red
+- **WHEN** the installed factory-build skill is read
+- **THEN** it tells the session to stop on `vacuous-red` and on `infrastructure-failure`

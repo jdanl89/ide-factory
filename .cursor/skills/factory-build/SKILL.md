@@ -24,11 +24,13 @@ Implement exactly one work item.
 
 **Prefer common tools.** If the work creates or scaffolds an app, use the ecosystem standard generator before inventing files by hand. Examples: `npm create vite@latest` for a Vite/React SPA, framework CLIs, official templates. Only hand-roll a toolchain when the OpenSpec design requires it.
 
-Write a failing test before production code when the profile includes unit or equivalent checks.
+Write a failing test before production code when the task class is `code` and the profile includes a test check (`unit`, `integration`, `playwright`, `contract`, or `unit-*`). Record it with `idefactory verify run <attemptId> --check <kind> --red`, then implement until green and record the passing run with `idefactory verify run <attemptId> --check <kind>`. A `lightweight` item does not require a failing test.
+
+Do not put a verification result on an attempt transition. Stop when the command names `vacuous-red` or `infrastructure-failure`.
 
 If a skill named `test-driven-development` is installed, follow that skill for the test cycle. Otherwise follow `factory-tdd`.
 
-Record red evidence on the attempt, then implement until green.
+Record red evidence on the attempt, then implement until green. Read the packet's Prior rejections section and address every note before asking for review again.
 
 Run verification profile checks before claiming done. Follow `factory-verify`.
 

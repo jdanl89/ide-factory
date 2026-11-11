@@ -34,6 +34,8 @@ export const STICKY_STOP_REASONS = new Set([
   'invalid-budget',
   'invalid-session',
   'host-usage-unavailable',
+  'vacuous-red',
+  'retry-cap',
 ]);
 
 export class InvalidBudgetError extends Error {
@@ -115,6 +117,7 @@ export function validateRunSession(session) {
       : [],
     lastRequestFingerprint: session.lastRequestFingerprint ?? null,
     stopReason: session.stopReason ?? null,
+    ...(session.testBaseline ? { testBaseline: session.testBaseline } : {}),
     ...(session.hostTokens !== undefined ? { hostTokens: session.hostTokens } : {}),
     ...(session.hostCost !== undefined ? { hostCost: session.hostCost } : {}),
   };
@@ -171,6 +174,17 @@ export function writeRunSession(project, session) {
  * @param {string} change
  * @returns {object|null}
  */
+export function closeLatestRunSession(project, change, stopReason) {
+  const existing = latestRunSession(project, change);
+  if (!existing) return null;
+  return writeRunSession(project, {
+    ...existing,
+    status: 'closed',
+    stopReason,
+    lastObservedAt: new Date().toISOString(),
+  });
+}
+
 export function latestRunSession(project, change) {
   const dir = runsDir(project);
   if (!fs.existsSync(dir)) return null;

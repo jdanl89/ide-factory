@@ -16,7 +16,7 @@ const ROLES = [
   'scribe',
 ];
 
-const SHARED_COMMANDS = ['status', 'plan', 'build', 'run', 'full', 'review'];
+const SHARED_COMMANDS = ['status', 'plan', 'build', 'run', 'full', 'review', 'setup'];
 
 /** Skill each shared command must direct the IDE to follow (by purpose, not bare name). */
 const COMMAND_SKILLS = {
@@ -26,7 +26,20 @@ const COMMAND_SKILLS = {
   run: [/factory-run/i],
   full: [/factory-full/i],
   review: [/factory-build/i, /factory-governance/i],
+  setup: [/factory-setup/i],
 };
+
+function mapUnit(dir) {
+  const registryPath = path.join(dir, '.factory/checks.json');
+  const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  registry.checks.unit = {
+    argv: ['node', '--test'],
+    cwdPolicy: 'project',
+    timeoutMs: 120000,
+    artifacts: [],
+  };
+  fs.writeFileSync(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
+}
 
 function read(dir, rel) {
   return fs.readFileSync(path.join(dir, rel), 'utf8');
@@ -77,24 +90,18 @@ test('init writes the seven-role roster, governance baseline, and machine work s
   }
 });
 
-test('init writes a schema-valid check registry with only unit → npm test', async () => {
+test('init writes a schema-valid check registry with no unit command', async () => {
   const dir = tempProject();
   try {
     assert.equal((await idefactory(dir, ['init'])).code, 0);
     const registryPath = path.join(dir, '.factory/checks.json');
     assert.equal(fs.existsSync(registryPath), true, '.factory/checks.json must exist after init');
-    const raw = fs.readFileSync(registryPath, 'utf8');
-    const registry = JSON.parse(raw);
+    const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
     assert.equal(registry.schemaVersion, 1);
-    assert.deepEqual(Object.keys(registry.checks).sort(), ['unit']);
-    const unit = registry.checks.unit;
-    assert.deepEqual(unit.argv, ['npm', 'test']);
-    assert.equal(unit.cwdPolicy, 'project');
-    assert.ok(Number.isInteger(unit.timeoutMs) && unit.timeoutMs > 0, 'timeoutMs must be positive');
-    assert.deepEqual(unit.artifacts, []);
+    assert.deepEqual(registry.checks, {});
     const accepted = validateCheckRegistry(registry, { projectRoot: dir });
     assert.equal(accepted.schemaVersion, 1);
-    assert.deepEqual(accepted.checks.unit.argv, ['npm', 'test']);
+    assert.deepEqual(accepted.checks, {});
   } finally {
     cleanup(dir);
   }
@@ -260,6 +267,7 @@ test('init writes Cline rule, skills, and workflows under .cline only', async ()
       'factory-tdd',
       'factory-verify',
       'factory-debug',
+      'factory-setup',
     ];
     for (const name of clineSkills) {
       const rel = `.cline/skills/${name}/SKILL.md`;
@@ -397,12 +405,18 @@ test('AGENTS.md factory section names the Cline factory rule', async () => {
   }
 });
 
-test('doctor fails in an empty directory and passes after init without backlog', async () => {
+test('doctor fails in an empty directory and after init until a test decision is recorded', async () => {
   const dir = tempProject();
   try {
     assert.notEqual((await idefactory(dir, ['doctor'])).code, 0);
-    assert.equal((await idefactory(dir, ['init'])).code, 0);
+    const created = await idefactory(dir, ['init']);
+    assert.equal(created.code, 0);
+    assert.match(created.out, /missing test decision/);
     assert.equal(fs.existsSync(path.join(dir, 'backlog')), false);
+    const beforeSetup = await idefactory(dir, ['doctor']);
+    assert.notEqual(beforeSetup.code, 0);
+    assert.match(beforeSetup.out, /missing test decision/);
+    mapUnit(dir);
     assert.equal((await idefactory(dir, ['doctor'])).code, 0);
   } finally {
     cleanup(dir);
@@ -413,6 +427,7 @@ test('doctor requires Cline factory rule and coordinator skill', async () => {
   const dir = tempProject();
   try {
     assert.equal((await idefactory(dir, ['init'])).code, 0);
+    mapUnit(dir);
     assert.equal((await idefactory(dir, ['doctor'])).code, 0);
 
     const rulePath = path.join(dir, '.cline/rules/factory.md');
@@ -503,22 +518,47 @@ test('implementation notes record add-cline-ide-adapter verification commands', 
   }
 });
 
-test('new init sets policy version 2 and reinstall preserves policy and checks.json', async () => {
+test('new init sets policy version 1 without a verifier and reinstall preserves policy and checks.json', async () => {
   const dir = tempProject();
   try {
     assert.equal((await idefactory(dir, ['init'])).code, 0);
     const configPath = path.join(dir, '.factory/config.json');
     const created = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    assert.equal(created.governance.policyVersion, 2);
-    created.governance.policyVersion = 1;
+    assert.equal(created.governance.policyVersion, 1);
+    assert.equal(created.governance.principalVerifier, undefined);
+    created.governance.policyVersion = 2;
     fs.writeFileSync(configPath, JSON.stringify(created, null, 2));
     const registryPath = path.join(dir, '.factory/checks.json');
     const custom = '{"schemaVersion":1,"checks":{"unit":{"argv":["npm","test"],"cwdPolicy":"project","timeoutMs":120000,"artifacts":[]},"project":{"argv":["node","-e","process.exit(0)"],"cwdPolicy":"project","timeoutMs":1000,"artifacts":[]}}}\n';
     fs.writeFileSync(registryPath, custom);
     assert.equal((await idefactory(dir, ['init'])).code, 0);
     const again = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    assert.equal(again.governance.policyVersion, 1);
+    assert.equal(again.governance.policyVersion, 2);
     assert.equal(fs.readFileSync(registryPath, 'utf8'), custom);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('factory-setup waits for confirmation and the README documents setup', async () => {
+  const dir = tempProject();
+  try {
+    assert.equal((await idefactory(dir, ['init'])).code, 0);
+    const skill = read(dir, '.cline/skills/factory-setup/SKILL.md');
+    assert.match(skill, /do not run `idefactory setup` before the human confirms/i);
+    assert.match(skill, /setup --detect/);
+    assert.match(read(dir, '.cline/workflows/factory-setup.md'), /factory-setup/);
+    assert.match(read(dir, '.cursor/skills/factory-coordinator/SKILL.md'), /factory-setup/);
+    const readme = fs.readFileSync(path.join(repoRoot, 'README.md'), 'utf8');
+    const section = readme.slice(
+      readme.indexOf('## Add it to a project'),
+      readme.indexOf('## How a change gets built'),
+    );
+    assert.match(section, /idefactory setup/);
+    assert.match(section, /--governance/);
+    assert.match(section, /lightweight/);
+    assert.match(section, /--verifier-argv/);
+    assert.match(section, /--no-test/);
   } finally {
     cleanup(dir);
   }

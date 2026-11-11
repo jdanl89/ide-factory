@@ -27,7 +27,7 @@
     "scribe": "ide-session"
   },
   "governance": {
-    "policyVersion": 2,
+    "policyVersion": 1,
     "protectedPaths": [".factory/decisions.md", ".factory/agents/"],
     "reviewerMustDiffer": true
   },

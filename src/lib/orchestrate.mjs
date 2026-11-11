@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { getAttempt, startAttempt, transitionAttempt } from './attempt.mjs';
+import { spawnSync } from 'node:child_process';
+import { attemptPath, getAttempt, startAttempt, transitionAttempt } from './attempt.mjs';
 import {
   canResumeFinalization,
   finalizationJournalPath,
@@ -8,7 +9,7 @@ import {
 } from './finalization-recovery.mjs';
 import { hasActiveLockout } from './govern.mjs';
 import { appendControlEvent } from './event-log.mjs';
-import { halted, ledger, readText } from './layout.mjs';
+import { halted, ledger, readText, writeText } from './layout.mjs';
 import { syncTasks } from './queue.mjs';
 import {
   checkHostUsageBudgets,
@@ -21,7 +22,9 @@ import {
   STICKY_STOP_REASONS,
   writeRunSession,
 } from './run-session.mjs';
+import { classifyCheckOutcome, isRequiredTestKind, retryKey } from './red-evidence.mjs';
 import { humanGateAllows } from './risk-gates.mjs';
+import { resolveGitBinding, validateCheckRegistry } from './verification-evidence.mjs';
 import { getWorkItem, listWorkItems, selectReady, workCounts } from './work.mjs';
 
 export const EXIT_OK = 0;
@@ -38,6 +41,7 @@ export function runFactory(project, env, {
   hostTokens,
   hostCost,
   newRun = false,
+  acceptBaseline = false,
 } = {}) {
   if (halted(project)) {
     const error = new Error('HALT file present. Factory commands are stopped. Remove it with idefactory resume.');
@@ -100,6 +104,14 @@ export function runFactory(project, env, {
       stopReason: session.stopReason,
       request: null,
     };
+  }
+  if (session.status === 'closed' && (session.stopReason === 'infrastructure-failure' || session.stopReason === 'baseline')) {
+    session = writeRunSession(project, {
+      ...session,
+      status: 'open',
+      stopReason: null,
+      lastObservedAt: new Date().toISOString(),
+    });
   }
   const hostStop = checkHostUsageBudgets(session, hostUsage);
   if (hostStop) {
@@ -269,6 +281,22 @@ export function runFactory(project, env, {
           request: null,
         };
       }
+      if ((attempt.state === 'planned' || attempt.state === 'assigned') && stage.nextState === 'implementing') {
+        const baseline = applyTestBaseline(project, session, attempt, { acceptBaseline });
+        session = baseline.session;
+        if (baseline.stop) {
+          session = closeRunSession(project, session, baseline.stop);
+          const extra = baseline.stop === 'infrastructure-failure'
+            ? 'Run idefactory setup to map a test command.\n'
+            : '';
+          return {
+            code: EXIT_OK,
+            text: `Run stopped (${baseline.stop}) for ${change}.\n${extra}`,
+            stopReason: baseline.stop,
+            request: null,
+          };
+        }
+      }
       const request = {
         action: 'agent-step',
         role: stage.role,
@@ -399,8 +427,10 @@ function closeRunSession(project, session, stopReason, extra = {}) {
 
 function stageForState(state, item) {
   const roles = item.factory?.roles || ['engineer', 'reviewer', 'scribe'];
-  const implementer = roles.find((role) => !['reviewer', 'scribe', 'security-reviewer'].includes(role))
-    || 'engineer';
+  const implementer = item.factory?.route === 'quick'
+    ? 'engineer'
+    : roles.find((role) => !['reviewer', 'scribe', 'security-reviewer'].includes(role))
+      || 'engineer';
   switch (state) {
     case 'planned':
     case 'assigned':
@@ -411,11 +441,19 @@ function stageForState(state, item) {
         message: 'Begin implementation. Record implementerId, then transition to implementing / red-confirmed.',
       };
     case 'implementing':
+      if (item.factory?.taskType === 'lightweight') {
+        return {
+          needsAgent: true,
+          role: implementer,
+          nextState: 'verifying',
+          message: 'Lightweight item. Implement and run verification. A failing test is not required.',
+        };
+      }
       return {
         needsAgent: true,
         role: implementer,
         nextState: 'red-confirmed',
-        message: 'Write a failing test and report red evidence.',
+        message: 'Write a failing test and report red evidence with idefactory verify run --red.',
       };
     case 'red-confirmed':
       return {
@@ -462,6 +500,7 @@ function stageForState(state, item) {
 }
 
 function primaryRole(item) {
+  if (item.factory?.route === 'quick') return 'engineer';
   const roles = item.factory?.roles || ['engineer'];
   return roles.find((role) => !['reviewer', 'scribe'].includes(role)) || 'engineer';
 }
@@ -530,6 +569,94 @@ function readConfig(project) {
   } catch {
     return {};
   }
+}
+
+function applyTestBaseline(project, session, attempt, { acceptBaseline }) {
+  const mapped = mappedTestChecks(project);
+  if (mapped.length === 0) return { session, stop: null };
+  const { sourceRevision } = resolveGitBinding(project);
+  const revision = sourceRevision || '';
+  const current = session.testBaseline;
+  if (
+    current
+    && current.sourceRevision === revision
+    && (current.result === 'passed' || current.result === 'accepted')
+  ) {
+    return { session, stop: null };
+  }
+
+  for (const entry of mapped) {
+    const classification = runMappedCheck(project, entry);
+    if (classification === 'infrastructure-failure') {
+      const count = bumpAttemptRetry(project, attempt, classification, entry.kind);
+      return { session, stop: count >= 4 ? 'retry-cap' : 'infrastructure-failure' };
+    }
+    if (classification === 'assertion-failure') {
+      if (acceptBaseline) {
+        return {
+          session: writeRunSession(project, {
+            ...session,
+            testBaseline: { sourceRevision: revision, result: 'accepted' },
+          }),
+          stop: null,
+        };
+      }
+      return { session, stop: 'baseline' };
+    }
+  }
+
+  return {
+    session: writeRunSession(project, {
+      ...session,
+      testBaseline: { sourceRevision: revision, result: 'passed' },
+    }),
+    stop: null,
+  };
+}
+
+function mappedTestChecks(project) {
+  const registryPath = path.join(project, '.factory', 'checks.json');
+  if (!fs.existsSync(registryPath)) return [];
+  try {
+    const registry = validateCheckRegistry(JSON.parse(readText(registryPath)), { projectRoot: project });
+    return Object.entries(registry.checks)
+      .filter(([kind]) => isRequiredTestKind(kind))
+      .map(([kind, entry]) => ({ kind, ...entry }));
+  } catch {
+    return [];
+  }
+}
+
+function runMappedCheck(project, entry) {
+  const result = spawnSync(entry.argv[0], entry.argv.slice(1), {
+    cwd: project,
+    shell: false,
+    timeout: entry.timeoutMs,
+    encoding: 'buffer',
+  });
+  const timedOut = Boolean(result.error && result.error.code === 'ETIMEDOUT');
+  const spawnError = result.error && !timedOut ? result.error : null;
+  const stdout = result.stdout || Buffer.alloc(0);
+  const stderr = result.stderr || Buffer.alloc(0);
+  return classifyCheckOutcome({
+    spawnError,
+    timedOut,
+    exitCode: typeof result.status === 'number' ? result.status : null,
+    output: Buffer.concat([stdout, stderr]).toString('utf8'),
+    asRed: false,
+  });
+}
+
+function bumpAttemptRetry(project, attempt, classification, kind) {
+  const fresh = getAttempt(project, attempt.id) || attempt;
+  const key = retryKey(classification, kind);
+  const counts = { ...(fresh.evidence?.retryCounts || {}) };
+  counts[key] = (counts[key] || 0) + 1;
+  fresh.evidence = fresh.evidence || {};
+  fresh.evidence.retryCounts = counts;
+  fresh.updatedAt = new Date().toISOString();
+  writeText(attemptPath(project, fresh.id), JSON.stringify(fresh, null, 2));
+  return counts[key];
 }
 
 export { getWorkItem, transitionAttempt };
