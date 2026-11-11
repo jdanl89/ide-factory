@@ -3,18 +3,44 @@
   "runtime": "ide",
   "ideation": false,
   "modelProfiles": {
-    "coding-standard": { "cursor": "inherit", "copilot": "ide-session", "claude": "ide-session" },
-    "review-strong": { "cursor": "inherit", "copilot": "ide-session", "claude": "ide-session" },
-    "security-strong": { "cursor": "inherit", "copilot": "ide-session", "claude": "ide-session" }
+    "coding-standard": {
+      "cursor": "inherit",
+      "copilot": "ide-session",
+      "claude": "ide-session"
+    },
+    "review-strong": {
+      "cursor": "inherit",
+      "copilot": "ide-session",
+      "claude": "ide-session"
+    },
+    "security-strong": {
+      "cursor": "inherit",
+      "copilot": "ide-session",
+      "claude": "ide-session"
+    }
   },
   "roles": {
-    "lead": { "modelProfile": "coding-standard" },
-    "architect": { "modelProfile": "coding-standard" },
-    "engineer": { "modelProfile": "coding-standard" },
-    "test-engineer": { "modelProfile": "coding-standard" },
-    "security-reviewer": { "modelProfile": "security-strong" },
-    "reviewer": { "modelProfile": "review-strong" },
-    "scribe": { "modelProfile": "coding-standard" }
+    "lead": {
+      "modelProfile": "coding-standard"
+    },
+    "architect": {
+      "modelProfile": "coding-standard"
+    },
+    "engineer": {
+      "modelProfile": "coding-standard"
+    },
+    "test-engineer": {
+      "modelProfile": "coding-standard"
+    },
+    "security-reviewer": {
+      "modelProfile": "security-strong"
+    },
+    "reviewer": {
+      "modelProfile": "review-strong"
+    },
+    "scribe": {
+      "modelProfile": "coding-standard"
+    }
   },
   "models": {
     "note": "Hints only. The IDE session model does the work. idefactory does not launch a model.",
@@ -27,13 +53,19 @@
     "scribe": "ide-session"
   },
   "governance": {
-    "protectedPaths": [".factory/decisions.md", ".factory/agents/"],
+    "protectedPaths": [
+      ".factory/decisions.md",
+      ".factory/agents/"
+    ],
     "reviewerMustDiffer": true,
     "policyVersion": 2,
     "principalVerifier": {
       "provider": "local",
       "timeoutMs": 5000,
-      "argv": ["node", "scripts/verify-local-principal.mjs"]
+      "argv": [
+        "node",
+        "scripts/verify-local-principal.mjs"
+      ]
     }
   },
   "run": {
