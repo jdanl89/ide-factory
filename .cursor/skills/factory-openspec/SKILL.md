@@ -45,4 +45,13 @@ Finalize with `idefactory complete` after review accepts. That checks the OpenSp
 
 When every box is checked, tell the human to archive and sync with OpenSpec. Do not archive from this skill.
 
+## Pull requests
+
+The only legal pull-request steps are `idefactory pr open <change>`, `idefactory pr comment <attemptId>`, and `idefactory pr capture <change>`.
+The agent never merges. It does not open or edit a pull request through the Cursor pull-request tool or a hand-written `gh pr create` or `gh pr edit`.
+
+`sync-tasks`, `run`, `approve`, `complete`, `verify`, `ci scaffold`, and archive or spec sync run only after the human asks for that action.
+
+When the human asks to archive, run `isDeliverableChange` first. If it is false, stop and do not move `openspec/changes/<change>/`. Spec sync stays human-gated and does not itself require the pull-request record.
+
 The IDE session model does the work.
