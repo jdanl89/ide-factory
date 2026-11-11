@@ -69,7 +69,7 @@ const SEEDED_SLACK_BOT_TOKEN = Buffer.from(
 
 function readWorkflow() {
   assert.ok(fs.existsSync(workflowPath), `missing ${workflowPath}`);
-  return fs.readFileSync(workflowPath, 'utf8');
+  return fs.readFileSync(workflowPath, 'utf8').replace(/\r\n/g, '\n');
 }
 
 function assertNodeVersion24(yaml, label) {
@@ -500,7 +500,7 @@ test('Semgrep command fails closed when absent, and --skip-semgrep warns and rec
 
 function readReleaseWorkflow() {
   assert.ok(fs.existsSync(releaseWorkflowPath), `missing ${releaseWorkflowPath}`);
-  return fs.readFileSync(releaseWorkflowPath, 'utf8');
+  return fs.readFileSync(releaseWorkflowPath, 'utf8').replace(/\r\n/g, '\n');
 }
 
 function releaseJobBlock(yaml) {
